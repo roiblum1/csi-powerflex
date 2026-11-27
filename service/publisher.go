@@ -135,7 +135,9 @@ func (p *SDCPublisher) Publish(ctx context.Context, req *csi.ControllerPublishVo
 			}
 		}
 		if isSingleNodeAccess(am) {
-			return nil, status.Errorf(codes.FailedPrecondition, "volume already published to SDC id: %s", p.vol.MappedSdcInfo[0].SdcID)
+			if err := p.clearSupersededMappings(ctx, adminClient, systemID, sdcID); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -174,6 +176,34 @@ func (p *SDCPublisher) Publish(ctx context.Context, req *csi.ControllerPublishVo
 	}
 
 	return &csi.ControllerPublishVolumeResponse{}, nil
+}
+
+// clearSupersededMappings runs when a single-node volume is already mapped to
+// SDCs other than sdcID. It removes mappings held by superseded SDC
+// registrations (see stale_sdc_mapping.go) and returns FailedPrecondition,
+// naming the blocking SDCs, if any other mapping remains.
+func (p *SDCPublisher) clearSupersededMappings(ctx context.Context, adminClient *goscaleio.Client, systemID, sdcID string) error {
+	sdcs, err := p.svc.listSystemSdcs(systemID)
+	if err != nil {
+		csmlog.WithContext(ctx).Warnf("cannot check mappings of volume %s for superseded SDCs: %v", p.vol.ID, err)
+		return status.Errorf(codes.FailedPrecondition, "volume already published to SDC id: %s", p.vol.MappedSdcInfo[0].SdcID)
+	}
+
+	removed, err := p.svc.unmapSupersededSdcMappings(ctx, adminClient, p.vol, sdcs, sdcID, "")
+	if err != nil {
+		return status.Errorf(codes.Internal, "volume %s: %s", p.vol.ID, err.Error())
+	}
+
+	remaining := remainingMappings(p.vol.MappedSdcInfo, removed)
+	if len(remaining) > 0 {
+		return status.Errorf(codes.FailedPrecondition, "volume already published to SDC id: %s (mapped to: %s)",
+			remaining[0].SdcID, describeMappings(remaining, sdcs))
+	}
+
+	csmlog.WithContext(ctx).Infof("volume %s: removed %d superseded SDC mapping(s), publishing to SDC %s",
+		p.vol.ID, len(removed), sdcID)
+	p.vol.MappedSdcInfo = remaining
+	return nil
 }
 
 func validateAndCompareQoS(volumeContext map[string]string, volName string, sdcInfo *siotypes.MappedSdcInfo) error {

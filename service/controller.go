@@ -2031,8 +2031,34 @@ func (s *service) ControllerUnpublishVolume(
 
 	hostID, hostType, err := s.getHostIDAndType(systemID, nodeID)
 	if err != nil || hostID == "" {
+		// CSI spec: if the node cannot be found and the volume can be regarded
+		// as unpublished from it, reply OK. With no SDC/NVMe host for this
+		// node ID on the system, nothing on the system can hold a mapping for
+		// it. Returning an error here keeps the VolumeAttachment forever and
+		// the pod on the new node waits on a Multi-Attach error.
+		if s.sdcHostAbsent(systemID, nodeID) {
+			csmlog.Warnf("ControllerUnpublishVolume: no SDC or NVMe host with ID %s exists on system %s; "+
+				"treating volume %s as unpublished from it", nodeID, systemID, csiVolID)
+			return &csi.ControllerUnpublishVolumeResponse{}, nil
+		}
 		return nil, status.Errorf(codes.Internal,
-			"error getting host ID for nodeID %s: %s", nodeID, err.Error())
+			"error getting host ID for nodeID %s: %v", nodeID, err)
+	}
+
+	// Remove mappings held by superseded registrations of THIS node's SDC
+	// (node re-imaged / SDC re-installed, see stale_sdc_mapping.go). They are
+	// invisible to the check below, which only looks at the current SDC ID.
+	// Best effort: SDCPublisher.Publish cleans them up too, so a failure here
+	// must not block the detach.
+	if hostType == SDC && hasForeignSdcMapping(vol, hostID) {
+		sdcs, listErr := s.listSystemSdcs(systemID)
+		if listErr == nil {
+			_, listErr = s.unmapSupersededSdcMappings(ctx, adminClient, vol, sdcs, hostID, hostID)
+		}
+		if listErr != nil {
+			csmlog.Warnf("ControllerUnpublishVolume: cleanup of superseded SDC mappings for volume %s failed: %v",
+				csiVolID, listErr)
+		}
 	}
 
 	for _, mapping := range vol.MappedSdcInfo {
