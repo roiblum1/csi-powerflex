@@ -112,7 +112,11 @@ func (f *e2eArray) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			kept = append(kept, m)
 		}
 		if !found {
-			f.writeErr(w, http.StatusInternalServerError, "Volume not mapped to SDC") // assumed wording
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(siotypes.Error{
+				Message: "Volume not mapped to SDC", HTTPStatusCode: http.StatusInternalServerError,
+				ErrorCode: 84, // PowerFlex 3.x: volume not mapped
+			})
 			return
 		}
 		f.mappings = kept

@@ -128,14 +128,35 @@ func TestFindSupersededSdcMappings(t *testing.T) {
 			want:     nil,
 		},
 		{
-			name:     "match on secondary data IP (sdcIps)",
+			name:     "all data IPs (sdcIps) moved to one connected SDC",
+			mappings: []*siotypes.MappedSdcInfo{testMapping("eeee000000000000", "192.168.10.5", sdcHostType)},
+			sdcs: []siotypes.Sdc{
+				testSdc("eeee000000000000", "GUID-E-OLD", "", sdcStateDisconnected, "192.168.10.5", "192.168.20.5"),
+				testSdc("eeee000000000001", "GUID-E-NEW", "192.168.20.5", sdcStateConnected, "192.168.10.5"),
+			},
+			keep: nodeB,
+			want: []string{"eeee000000000000->eeee000000000001"},
+		},
+		{
+			name:     "only some data IPs moved is not stale",
 			mappings: []*siotypes.MappedSdcInfo{testMapping("eeee000000000000", "192.168.10.5", sdcHostType)},
 			sdcs: []siotypes.Sdc{
 				testSdc("eeee000000000000", "GUID-E-OLD", "", sdcStateDisconnected, "192.168.10.5", "192.168.20.5"),
 				testSdc("eeee000000000001", "GUID-E-NEW", "192.168.20.5", sdcStateConnected),
 			},
 			keep: nodeB,
-			want: []string{"eeee000000000000->eeee000000000001"},
+			want: nil,
+		},
+		{
+			name:     "data IPs split across two connected SDCs is not stale",
+			mappings: []*siotypes.MappedSdcInfo{testMapping("eeee000000000000", "192.168.10.5", sdcHostType)},
+			sdcs: []siotypes.Sdc{
+				testSdc("eeee000000000000", "GUID-E-OLD", "", sdcStateDisconnected, "192.168.10.5", "192.168.20.5"),
+				testSdc("eeee000000000001", "GUID-E-NEW", "192.168.20.5", sdcStateConnected),
+				testSdc("ffff000000000001", "GUID-F", "192.168.10.5", sdcStateConnected),
+			},
+			keep: nodeB,
+			want: nil,
 		},
 		{
 			name: "duplicate mapping entries are reported once",
@@ -232,10 +253,21 @@ func TestSdcIPAddrs(t *testing.T) {
 }
 
 func TestIsNotMappedError(t *testing.T) {
-	if !isNotMappedError(errors.New("Volume not mapped to SDC")) {
-		t.Fatal("expected true")
+	for _, err := range []error{
+		&siotypes.Error{ErrorCode: sioErrVolumeNotMapped},
+		&siotypes.Error{ErrorCode: sioErrVolumeNotMappedV4},
+	} {
+		if !isNotMappedError(err) {
+			t.Fatalf("%v: expected true", err)
+		}
 	}
-	if isNotMappedError(errors.New("induced error")) || isNotMappedError(nil) {
-		t.Fatal("expected false")
+	for _, err := range []error{
+		nil,
+		errors.New("Volume not mapped to SDC"), // the text alone is not trusted
+		&siotypes.Error{Message: "induced error", ErrorCode: 500},
+	} {
+		if isNotMappedError(err) {
+			t.Fatalf("%v: expected false", err)
+		}
 	}
 }

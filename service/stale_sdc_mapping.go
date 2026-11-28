@@ -32,15 +32,21 @@ package service
 // A mapping is treated as stale only when ALL of these hold:
 //   - it is an SDC mapping (not NVMe/TCP),
 //   - the SDC holding it is reported "Disconnected" by the MDM,
-//   - exactly one OTHER SDC, which is "Connected", owns one of its IP addresses.
+//   - every one of its IP addresses is owned by the same single OTHER SDC,
+//     which is "Connected", and by no other connected SDC.
 //
 // That combination means the host now runs a different SDC registration from
-// the same address, so the old registration cannot be the one doing I/O. Any
+// the same addresses, so the old registration cannot be the one doing I/O. Any
 // other foreign mapping (a live SDC, a host that is just powered off, an SDC
 // unknown to this system) is left alone and still blocks single-node publish.
+//
+// Not covered: an SDC that registers again from a different IP address, or
+// behind NAT. IP addresses are then no evidence the old registration is dead,
+// so its mappings still have to be removed on PowerFlex by hand.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -57,6 +63,12 @@ const (
 	// sdcHostType is MappedSdcInfo.HostType for SDC mappings. PowerFlex 3.6
 	// leaves HostType empty.
 	sdcHostType = "SdcHost"
+
+	// PowerFlex error codes for removeMappedSdc on a volume that is not mapped
+	// to the SDC (3.x and 4.x). os-brick's PowerFlex connector ignores the same
+	// two codes when it unmaps (os_brick/initiator/connectors/scaleio.py).
+	sioErrVolumeNotMapped   = 84
+	sioErrVolumeNotMappedV4 = 4039
 )
 
 // staleSdcMapping is a volume mapping held by a superseded SDC registration.
@@ -144,11 +156,13 @@ func findSupersededSdcMappings(
 }
 
 // uniqueSuccessor returns the single connected SDC, other than old, that owns
-// one of old's IPs. It returns false if there is none, or more than one (an
-// ambiguous address is not proof the old registration is dead).
+// every one of old's IPs. It returns false if an IP of old has no such owner,
+// or if two different SDCs own them (an address that moved elsewhere, or is
+// shared, is not proof the old registration is dead).
 func uniqueSuccessor(old siotypes.Sdc, connectedByIP map[string][]siotypes.Sdc) (siotypes.Sdc, bool) {
 	var found *siotypes.Sdc
 	for _, ip := range sdcIPAddrs(&old) {
+		owned := false
 		for i := range connectedByIP[ip] {
 			c := connectedByIP[ip][i]
 			if c.ID == old.ID {
@@ -161,6 +175,10 @@ func uniqueSuccessor(old siotypes.Sdc, connectedByIP map[string][]siotypes.Sdc) 
 				return siotypes.Sdc{}, false
 			}
 			found = &c
+			owned = true
+		}
+		if !owned {
+			return siotypes.Sdc{}, false
 		}
 	}
 	if found == nil {
@@ -219,7 +237,11 @@ func describeMappings(mappings []*siotypes.MappedSdcInfo, sdcs []siotypes.Sdc) s
 // isNotMappedError reports whether an unmap error only says the mapping is
 // already gone (for example removed by a concurrent operator action).
 func isNotMappedError(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not mapped")
+	var sioErr *siotypes.Error
+	if !errors.As(err, &sioErr) {
+		return false
+	}
+	return sioErr.ErrorCode == sioErrVolumeNotMapped || sioErr.ErrorCode == sioErrVolumeNotMappedV4
 }
 
 // listSystemSdcs returns all SDCs of a system.
